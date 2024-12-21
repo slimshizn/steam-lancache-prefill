@@ -13,10 +13,12 @@
         public string ChunkId;
 
         /// <summary>
-        /// The content-length of the data to be requested.
+        /// The content-length of the data to be requested, in bytes.
         /// </summary>
         [ProtoMember(3)]
         public readonly uint CompressedLength;
+
+        public Exception LastFailureReason { get; set; }
 
         public QueuedRequest(Manifest depotManifest, ChunkData chunk)
         {

@@ -33,11 +33,11 @@ namespace SteamPrefill.Test
                     }
                 }
             };
-            var appInfoHandlerMock = new Mock<AppInfoHandler>(null, null);
+            var appInfoHandlerMock = new Mock<AppInfoHandler>(null, null, null);
             appInfoHandlerMock.Setup(e => e.GetAppInfoAsync(It.IsAny<uint>()))
                           .Returns(Task.FromResult(new AppInfo(steam3, 222, appKeyValues)));
 
-            _depotHandler = new DepotHandler(new TestConsole(), steam3, appInfoHandlerMock.Object, null, new DownloadArguments());
+            _depotHandler = new DepotHandler(new TestConsole(), steam3, appInfoHandlerMock.Object, null);
         }
 
         [Fact]
@@ -45,7 +45,7 @@ namespace SteamPrefill.Test
         {
             var depotList = new List<DepotInfo>
             {
-                new DepotInfo { DepotId = 777, ManifestId = 55 }
+                new DepotInfo(new KeyValue("0"), 222) { DepotId = 777, ManifestId = 55 }
             };
 
             var filteredDepots = await _depotHandler.FilterDepotsToDownloadAsync(new DownloadArguments(), depotList);
@@ -100,13 +100,13 @@ namespace SteamPrefill.Test
                 {
                     DepotId = 123,
                     ManifestId = 5555,
-                    SupportedOperatingSystems = supportedOS.Split(" ").Select(e => OperatingSystem.Parse(e)).ToList()
+                    SupportedOperatingSystems = supportedOS.Split(" ").Select(e => OperatingSystem.FromValue(e)).ToList()
                 }
             };
 
             var downloadArguments = new DownloadArguments
             {
-                OperatingSystems = downloadOS.Split(" ").Select(e => OperatingSystem.Parse(e)).ToList()
+                OperatingSystems = downloadOS.Split(" ").Select(e => OperatingSystem.FromValue(e)).ToList()
             };
             var filteredDepots = await _depotHandler.FilterDepotsToDownloadAsync(downloadArguments, depotList);
             Assert.Single(filteredDepots);

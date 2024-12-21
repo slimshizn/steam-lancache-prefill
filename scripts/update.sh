@@ -18,7 +18,7 @@ if ! [ -x "$(command -v unzip)" ]; then
   exit 1
 fi
 if ! [ -x "$(command -v wget)" ]; then
-  echo -e "${RED}Required software unzip is not installed.${NC}" >&2
+  echo -e "${RED}Required software wget is not installed.${NC}" >&2
   exit 1
 fi
 
@@ -32,6 +32,16 @@ if [ -z "${LATEST_TAG}" ]; then
     exit 1
 fi
 echo -e " Found latest version : ${Cyan} ${LATEST_TAG} ${NC}"
+
+# Checking to see if SteamPrefill is already up to date
+if [ -f ./SteamPrefill ]; then
+    CURRENT_VERSION=$(./SteamPrefill --version)
+
+    if [ "${CURRENT_VERSION}" == "v${LATEST_TAG}" ]; then
+        echo -e "${Yellow} Already up to date !${NC}"
+        exit
+    fi
+fi
 
 # Downloading latest version
 echo -e "${Yellow} Downloading... ${NC}"

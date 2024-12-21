@@ -1,13 +1,7 @@
 ﻿namespace SteamPrefill.Models.Exceptions
 {
-    [Serializable]
-    public class ManifestException : Exception
+    public sealed class ManifestException : Exception
     {
-        protected ManifestException(SerializationInfo info, StreamingContext context) : base(info, context)
-        {
-
-        }
-
         public ManifestException()
         {
 

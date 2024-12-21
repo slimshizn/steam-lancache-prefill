@@ -16,10 +16,8 @@
             _ansiConsole = ansiConsole;
             _cdnPool = cdnPool;
 
-            _client = new HttpClient
-            {
-                Timeout = AppConfig.SteamKitRequestTimeout
-            };
+            _client = new HttpClient();
+            // Lancache requires this user agent in order to correctly identify and cache Valve's content servers
             _client.DefaultRequestHeaders.Add("User-Agent", "Valve/Steam HTTP Client 1.0");
         }
 
@@ -27,7 +25,7 @@
         {
             if (_lancacheAddress == null)
             {
-                _lancacheAddress = await LancacheIpResolver.ResolveLancacheIpAsync(_ansiConsole, AppConfig.SteamCdnUrl);
+                _lancacheAddress = await LancacheIpResolver.ResolveLancacheIpAsync(_ansiConsole, AppConfig.SteamTriggerDomain);
             }
         }
 
@@ -36,15 +34,9 @@
         /// In the case of any failed downloads, the failed downloads will be retried up to 3 times.  If the downloads fail 3 times, then
         /// false will be returned
         /// </summary>
-        /// <returns>True if all downloads succeeded.  False if downloads failed 3 times.</returns>
+        /// <returns>True if all downloads succeeded.  False if any downloads failed 3 times in a row.</returns>
         public async Task<bool> DownloadQueuedChunksAsync(List<QueuedRequest> queuedRequests, DownloadArguments downloadArgs)
         {
-#if DEBUG
-            if (AppConfig.SkipDownloads)
-            {
-                return true;
-            }
-#endif
             await InitializeAsync();
 
             int retryCount = 0;
@@ -55,31 +47,41 @@
                 failedRequests = await AttemptDownloadAsync(ctx, "Downloading..", queuedRequests, downloadArgs);
 
                 // Handle any failed requests
-                while (failedRequests.Any() && retryCount < 3)
+                while (failedRequests.Any() && retryCount < 2)
                 {
                     retryCount++;
-                    await Task.Delay(2000 * retryCount);
-                    failedRequests = await AttemptDownloadAsync(ctx, $"Retrying  {retryCount}..", failedRequests.ToList(), downloadArgs);
+                    failedRequests = await AttemptDownloadAsync(ctx, $"Retrying  {retryCount}..", failedRequests.ToList(), downloadArgs, forceRecache: true);
                 }
             });
 
             // Handling final failed requests
-            if (!failedRequests.Any())
+            if (failedRequests.IsEmpty)
             {
                 return true;
             }
 
-            _ansiConsole.MarkupLine(Red($"{failedRequests.Count} failed downloads"));
+            _ansiConsole.LogMarkupError($"Download failed! {LightYellow(failedRequests.Count)} requests failed unexpectedly, see {LightYellow("app.log")} for more details.");
+            _ansiConsole.WriteLine();
+
+            // Web requests frequently fail due to transient errors, so displaying all errors to the user is unnecessary or even confusing.
+            // However, if a request fails repeatedly then there might be an underlying issue preventing success.
+            // The number of failures could approach in the thousands or even more, so rather than spam the console
+            // we will instead log them as a batch to app.log
+            foreach (var failedRequest in failedRequests)
+            {
+                FileLogger.LogExceptionNoStackTrace($"Request /depot/{failedRequest.DepotId}/chunk/{failedRequest.ChunkId} failed", failedRequest.LastFailureReason);
+            }
             return false;
         }
 
-
+        //TODO I don't like the number of parameters here, should maybe rethink the way this is written.
         /// <summary>
-        /// Attempts to download the specified requests.  Returns a list of any requests that have failed.
+        /// Attempts to download the specified requests.  Returns a list of any requests that have failed for any reason.
         /// </summary>
+        /// <param name="forceRecache">When specified, will cause the cache to delete the existing cached data for a request, and re-download it again.</param>
         /// <returns>A list of failed requests</returns>
-        [SuppressMessage("Reliability", "CA2016:Forward the 'CancellationToken' parameter to methods", Justification = "Don't have a need to cancel")]
-        public async Task<ConcurrentBag<QueuedRequest>> AttemptDownloadAsync(ProgressContext ctx, string taskTitle, List<QueuedRequest> requestsToDownload, DownloadArguments downloadArgs)
+        public async Task<ConcurrentBag<QueuedRequest>> AttemptDownloadAsync(ProgressContext ctx, string taskTitle, List<QueuedRequest> requestsToDownload,
+                                                                                DownloadArguments downloadArgs, bool forceRecache = false)
         {
             double requestTotalSize = requestsToDownload.Sum(e => e.CompressedLength);
             var progressTask = ctx.AddTask(taskTitle, new ProgressTaskSettings { MaxValue = requestTotalSize });
@@ -87,31 +89,38 @@
             var failedRequests = new ConcurrentBag<QueuedRequest>();
 
             var cdnServer = _cdnPool.TakeConnection();
-            await Parallel.ForEachAsync(requestsToDownload, new ParallelOptions { MaxDegreeOfParallelism = downloadArgs.MaxConcurrentRequests }, async (request, _) =>
+            await Parallel.ForEachAsync(requestsToDownload, new ParallelOptions { MaxDegreeOfParallelism = downloadArgs.MaxConcurrentRequests }, body: async (request, _) =>
             {
-                var buffer = new byte[4096];
                 try
                 {
                     var url = $"http://{_lancacheAddress}/depot/{request.DepotId}/chunk/{request.ChunkId}";
+                    if (forceRecache)
+                    {
+                        url += "?nocache=1";
+                    }
                     using var requestMessage = new HttpRequestMessage(HttpMethod.Get, url);
                     requestMessage.Headers.Host = cdnServer.Host;
 
-                    var response = await _client.SendAsync(requestMessage, HttpCompletionOption.ResponseHeadersRead);
-                    using Stream responseStream = await response.Content.ReadAsStreamAsync();
+                    using var cts = new CancellationTokenSource();
+                    using var response = await _client.SendAsync(requestMessage, HttpCompletionOption.ResponseHeadersRead, cts.Token);
+                    using Stream responseStream = await response.Content.ReadAsStreamAsync(cts.Token);
                     response.EnsureSuccessStatusCode();
 
                     // Don't save the data anywhere, so we don't have to waste time writing it to disk.
-                    while (await responseStream.ReadAsync(buffer, 0, buffer.Length, _) != 0)
+                    var buffer = new byte[4096];
+                    while (await responseStream.ReadAsync(buffer, cts.Token) != 0)
                     {
                     }
                 }
-                catch
+                catch (Exception e)
                 {
+                    request.LastFailureReason = e;
                     failedRequests.Add(request);
                 }
                 progressTask.Increment(request.CompressedLength);
             });
 
+            //TODO In the scenario where a user still had all requests fail, potentially display a warning that there is an underlying issue
             // Only return the connections for reuse if there were no errors
             if (failedRequests.IsEmpty)
             {

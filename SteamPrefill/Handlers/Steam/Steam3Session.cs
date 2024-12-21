@@ -2,35 +2,70 @@ namespace SteamPrefill.Handlers.Steam
 {
     public sealed class Steam3Session : IDisposable
     {
+        /// <summary>
+        /// CellId represents the region that the user is geographically located in, and determines which Connection Managers and CDNs
+        /// will be used by SteamPrefill.
+        ///
+        /// Typically, Steam will automatically select the correct CellId using geolocation.
+        /// However, the api endpoint used (ISteamDirectory/GetCMList) will unpredictably return non-local servers due to an issue with Valve's
+        /// api not handling trailing slashes correctly.
+        ///
+        /// For example calling ISteamDirectory/GetCMList/v1?cellid=0 will always return the correct regional servers, however adding a trailing slash
+        /// to the end of the url (ex. /v1/?) will cause Steam to return non-local servers.
+        ///
+        /// Upon login to the Steam network certain metadata about the session will be received, this includes the correct CellId which we will save
+        /// and use for future logins.  Using the correct CellId will guarantee significantly faster login and app metadata retrieval times.
+        ///
+        /// See https://tpill90.github.io/steam-lancache-prefill/steam-docs/CDN-Regions/ for a list of known CDNs
+        /// </summary>
+        private uint CellId
+        {
+            get
+            {
+                if (AppConfig.CellIdOverride != null)
+                {
+                    return AppConfig.CellIdOverride.Value;
+                }
+                if (File.Exists(AppConfig.CachedCellIdPath))
+                {
+                    return uint.Parse(File.ReadAllText(AppConfig.CachedCellIdPath));
+                }
+                return 0;
+            }
+            set => File.WriteAllText(AppConfig.CachedCellIdPath, value.ToString());
+        }
+
+        #region Member fields
+
         // Steam services
         private readonly SteamClient _steamClient;
-        private readonly SteamUser _steamUser;
         public readonly SteamContent SteamContent;
         public readonly SteamApps SteamAppsApi;
         public readonly Client CdnClient;
-        public SteamUnifiedMessages.UnifiedService<IPlayer> unifiedPlayerService;
-
+        public Player unifiedPlayerService;
         private readonly CallbackManager _callbackManager;
 
         private SteamUser.LogOnDetails _logonDetails;
         private readonly IAnsiConsole _ansiConsole;
 
         private readonly UserAccountStore _userAccountStore;
-
         public readonly LicenseManager LicenseManager;
 
         public SteamID _steamId;
+
+        #endregion
 
         public Steam3Session(IAnsiConsole ansiConsole)
         {
             _ansiConsole = ansiConsole;
 
-            _steamClient = new SteamClient();
-            _steamUser = _steamClient.GetHandler<SteamUser>();
+            _steamClient = new SteamClient(SteamConfiguration.Create(e => e.WithCellID(CellId)
+                                                               .WithConnectionTimeout(TimeSpan.FromSeconds(10))));
+
             SteamAppsApi = _steamClient.GetHandler<SteamApps>();
             SteamContent = _steamClient.GetHandler<SteamContent>();
             SteamUnifiedMessages steamUnifiedMessages = _steamClient.GetHandler<SteamUnifiedMessages>();
-            unifiedPlayerService = steamUnifiedMessages.CreateService<IPlayer>();
+            unifiedPlayerService = steamUnifiedMessages.CreateService<Player>();
 
             _callbackManager = new CallbackManager(_steamClient);
 
@@ -40,25 +75,32 @@ namespace SteamPrefill.Handlers.Steam
                 _isConnecting = false;
                 _disconnected = false;
             });
-            // If a connection attempt fails in anyway, SteamKit2 notifies of the failure with a "disconnect"
+            // If a connection attempt fails in any way, SteamKit2 notifies of the failure with a "disconnect"
             _callbackManager.Subscribe<SteamClient.DisconnectedCallback>(e =>
             {
                 _isConnecting = false;
                 _disconnected = true;
             });
 
-            _callbackManager.Subscribe<SteamUser.LoggedOnCallback>(loggedOn => _loggedOnCallbackResult = loggedOn);
-            _callbackManager.Subscribe<SteamUser.UpdateMachineAuthCallback>(UpdateMachineAuthCallback);
-            _callbackManager.Subscribe<SteamUser.LoginKeyCallback>(LoginKeyCallback);
-            _callbackManager.Subscribe<SteamApps.LicenseListCallback>(LicenseListCallback);
+            _callbackManager.Subscribe<SteamUser.LoggedOnCallback>(loggedOn =>
+            {
+                _loggedOnCallbackResult = loggedOn;
+                CellId = loggedOn.CellID;
+            });
+            _callbackManager.Subscribe<LicenseListCallback>(LicenseListCallback);
 
             CdnClient = new Client(_steamClient);
             // Configuring SteamKit's HttpClient to timeout in a more reasonable time frame.  This is only used when downloading manifests
-            Client.ResponseBodyTimeout = AppConfig.SteamKitRequestTimeout;
-            Client.RequestTimeout = AppConfig.SteamKitRequestTimeout;
+            Client.RequestTimeout = TimeSpan.FromSeconds(60);
 
             _userAccountStore = UserAccountStore.LoadFromFile();
-            LicenseManager = new LicenseManager(SteamAppsApi, _userAccountStore);
+            LicenseManager = new LicenseManager(SteamAppsApi);
+
+            // Setting up optional SteamKit2 debug output.  Not enabled by default because it writes out way too much output that isn't useful outside of debugging.
+            if (AppConfig.DebugLogs)
+            {
+                DebugLog.AddListener(new SteamKitDebugListener(_ansiConsole));
+            }
         }
 
         public async Task LoginToSteamAsync()
@@ -70,12 +112,17 @@ namespace SteamPrefill.Handlers.Steam
             while (!logonSuccess)
             {
                 _callbackManager.RunWaitAllCallbacks(timeout: TimeSpan.FromMilliseconds(50));
+
                 SteamUser.LoggedOnCallback logonResult = null;
-                _ansiConsole.StatusSpinner().Start("Connecting to Steam...", ctx =>
+                await _ansiConsole.StatusSpinner().StartAsync("Connecting to Steam...", async ctx =>
                 {
                     ConnectToSteam();
 
-                    ctx.Status = "Logging into Steam...";
+                    // Making sure that we have a valid access token before moving onto the login
+                    ctx.Status = "Retrieving access token...";
+                    await GetAccessTokenAsync();
+
+                    ctx.Status = "Logging in to Steam...";
                     logonResult = AttemptSteamLogin();
                 });
 
@@ -88,10 +135,48 @@ namespace SteamPrefill.Handlers.Steam
                 }
             }
 
-            _ansiConsole.StatusSpinner().Start("Saving Steam session...", _ =>
+            _ansiConsole.LogMarkupVerbose($"Connected to CM {Cyan(_steamClient.CurrentEndPoint)}");
+        }
+
+        private async Task GetAccessTokenAsync()
+        {
+            if (_userAccountStore.AccessTokenIsValid())
             {
-                TryWaitForLoginKey();
+                return;
+            }
+
+            _ansiConsole.LogMarkupLine("Requesting new access token...");
+
+            // Begin authenticating via credentials
+            var authSession = await _steamClient.Authentication.BeginAuthSessionViaCredentialsAsync(new AuthSessionDetails
+            {
+                Username = _logonDetails.Username,
+                Password = _logonDetails.Password,
+                IsPersistentSession = true,
+                Authenticator = new UserConsoleAuthenticator()
             });
+
+            // Starting polling Steam for authentication response
+            var pollResponse = await authSession.PollingWaitForResultAsync();
+            _userAccountStore.AccessToken = pollResponse.RefreshToken;
+            _userAccountStore.Save();
+
+            // Clearing password so it doesn't stay in memory
+            _logonDetails.Password = null;
+            GC.Collect();
+        }
+
+        private async Task ConfigureLoginDetailsAsync()
+        {
+            var username = await _userAccountStore.GetUsernameAsync(_ansiConsole);
+
+            _logonDetails = new SteamUser.LogOnDetails
+            {
+                Username = username,
+                ShouldRememberPassword = true,
+                Password = _userAccountStore.AccessTokenIsValid() ? null : await _ansiConsole.ReadPasswordAsync(),
+                LoginID = _userAccountStore.SessionId
+            };
         }
 
         #region  Connecting to Steam
@@ -106,6 +191,7 @@ namespace SteamPrefill.Handlers.Steam
         /// <exception cref="SteamConnectionException">Throws if unable to connect to Steam</exception>
         private void ConnectToSteam()
         {
+            _ansiConsole.LogMarkupVerbose($"Connecting with CellId: {Magenta(CellId)}");
             var timeoutAfter = DateTime.Now.AddSeconds(30);
 
             // Busy waiting until the client has a successful connection established
@@ -124,45 +210,25 @@ namespace SteamPrefill.Handlers.Steam
                     }
                 }
             }
+            _ansiConsole.LogMarkupLine("Connected to Steam!");
         }
 
         #endregion
 
         #region Logging into Steam
 
-        private async Task ConfigureLoginDetailsAsync()
-        {
-            var username = await _userAccountStore.GetUsernameAsync(_ansiConsole);
-
-            //TODO rename to session key
-            string loginKey;
-            _userAccountStore.LoginKeys.TryGetValue(username, out loginKey);
-
-            _logonDetails = new SteamUser.LogOnDetails
-            {
-                Username = username,
-                Password = loginKey == null ? await _ansiConsole.ReadPasswordAsync() : null,
-                ShouldRememberPassword = true,
-                LoginKey = loginKey,
-                //TODO randomize and save this loginId per instance.  Should prevent multiple instances of SteamPrefill from being logged out
-                LoginID = 5395
-            };
-            // Sentry file is required when using Steam Guard w\ email
-            if (_userAccountStore.SentryData.TryGetValue(_logonDetails.Username, out var bytes))
-            {
-                _logonDetails.SentryFileHash = bytes.ToSha1();
-            }
-        }
-
         private SteamUser.LoggedOnCallback _loggedOnCallbackResult;
+        private int _failedLogonAttempts;
 
         [SuppressMessage("Maintainability", "CA1508:Avoid dead conditional code", Justification = "while() loop is not infinite.  _loggedOnCallbackResult is set after logging into Steam")]
         private SteamUser.LoggedOnCallback AttemptSteamLogin()
         {
             var timeoutAfter = DateTime.Now.AddSeconds(30);
-
+            // Need to reset this global result value, as it will be populated once the logon callback completes
             _loggedOnCallbackResult = null;
-            _steamUser.LogOn(_logonDetails);
+
+            _logonDetails.AccessToken = _userAccountStore.AccessToken;
+            _steamClient.GetHandler<SteamUser>().LogOn(_logonDetails);
 
             // Busy waiting for the callback to complete, then we can return the callback value synchronously
             while (_loggedOnCallbackResult == null)
@@ -175,8 +241,6 @@ namespace SteamPrefill.Handlers.Steam
             }
             return _loggedOnCallbackResult;
         }
-
-        private int _failedLogonAttempts;
 
         [SuppressMessage("", "VSTHRD002:Synchronously waiting on tasks may cause deadlocks.", Justification = "Its not possible for this callback method to be async, must block synchronously")]
         private bool HandleLogonResult(SteamUser.LoggedOnCallback logonResult)
@@ -199,15 +263,6 @@ namespace SteamPrefill.Handlers.Steam
                 return false;
             }
 
-            var loginKeyExpired = _logonDetails.LoginKey != null && loggedOn.Result == EResult.InvalidPassword;
-            if (loginKeyExpired)
-            {
-                _userAccountStore.LoginKeys.Remove(_logonDetails.Username);
-                _logonDetails.LoginKey = null;
-                _logonDetails.Password = _ansiConsole.ReadPasswordAsync("Steam session expired!  Password re-entry required!").GetAwaiter().GetResult();
-                return false;
-            }
-
             if (loggedOn.Result == EResult.InvalidPassword)
             {
                 _failedLogonAttempts++;
@@ -220,7 +275,14 @@ namespace SteamPrefill.Handlers.Steam
                 _logonDetails.Password = _ansiConsole.ReadPasswordAsync($"{Red("Invalid password!  Please re-enter your password!")}").GetAwaiter().GetResult();
                 return false;
             }
-
+            // User previously authenticated, but changed their password such that the previous access token is no longer valid.
+            if (loggedOn.Result == EResult.AccessDenied)
+            {
+                _ansiConsole.LogMarkupLine(Red("Steam password was changed!  Current login token is no longer valid.  Re-authentication is required..."));
+                _logonDetails.Password = _ansiConsole.ReadPasswordAsync($"{Red("Please enter your password!")}").GetAwaiter().GetResult();
+                _userAccountStore.AccessToken = null;
+                return false;
+            }
             // SteamGuard code required
             if (loggedOn.Result == EResult.AccountLogonDenied)
             {
@@ -230,14 +292,14 @@ namespace SteamPrefill.Handlers.Steam
             }
             if (loggedOn.Result == EResult.ServiceUnavailable)
             {
-                throw new SteamLoginException($"Unable to login to Steam : Service is unavailable");
+                throw new SteamLoginException("Unable to login to Steam : Service is unavailable");
             }
             if (loggedOn.Result != EResult.OK)
             {
                 throw new SteamLoginException($"Unable to login to Steam.  An unknown error occurred : {loggedOn.Result}");
             }
 
-            _ansiConsole.LogMarkupLine($"Logged into Steam");
+            _ansiConsole.LogMarkupLine("Logged into Steam");
 
             // Forcing a garbage collect to remove stored password from memory
             if (_logonDetails.Password != null)
@@ -249,41 +311,13 @@ namespace SteamPrefill.Handlers.Steam
             return true;
         }
 
-        //TODO comment what exactly were waiting on here, and why.
-        bool _receivedLoginKey;
-        private void TryWaitForLoginKey()
-        {
-            if (_logonDetails.LoginKey != null)
-            {
-                return;
-            }
-
-            var totalWaitPeriod = DateTime.Now.AddSeconds(10);
-            while (!_receivedLoginKey)
-            {
-                if (DateTime.Now >= totalWaitPeriod)
-                {
-                    _ansiConsole.LogMarkupLine(Red("Failed to save Steam session key.  Steam account will not stay logged in..."));
-                    return;
-                }
-                _callbackManager.RunWaitAllCallbacks(TimeSpan.FromMilliseconds(50));
-            }
-        }
-
-        private void LoginKeyCallback(SteamUser.LoginKeyCallback loginKey)
-        {
-            _userAccountStore.LoginKeys[_logonDetails.Username] = loginKey.LoginKey;
-            _userAccountStore.Save();
-
-            _steamUser.AcceptNewLoginKey(loginKey);
-            _receivedLoginKey = true;
-        }
-
         private bool _disconnected = true;
         public void Disconnect()
         {
             if (_disconnected)
             {
+                // Needed so message doesn't display on the same line as the prompt
+                _ansiConsole.WriteLine("");
                 _ansiConsole.LogMarkupLine("Already disconnected from Steam");
                 return;
             }
@@ -299,39 +333,6 @@ namespace SteamPrefill.Handlers.Steam
                 }
             });
             _ansiConsole.LogMarkupLine("Disconnected from Steam!");
-        }
-
-        #endregion
-
-        #region Other Auth Methods
-
-        /// <summary>
-        /// The UpdateMachineAuth event will be triggered once the user has logged in with either Steam Guard or 2FA enabled.
-        /// This callback handler will save a "sentry file" for future logins, that will allow an existing Steam session to be reused,
-        /// without requiring a password.
-        ///
-        /// Despite the fact that this will be triggered for both Steam Guard + 2FA, the sentry file is only required for re-login when using an
-        /// account with Steam Guard enabled.
-        /// </summary>
-        private void UpdateMachineAuthCallback(SteamUser.UpdateMachineAuthCallback machineAuth)
-        {
-            _userAccountStore.SentryData[_logonDetails.Username] = machineAuth.Data;
-            _userAccountStore.Save();
-
-            var authResponse = new SteamUser.MachineAuthDetails
-            {
-                BytesWritten = machineAuth.BytesToWrite,
-                FileName = machineAuth.FileName,
-                FileSize = machineAuth.BytesToWrite,
-                Offset = machineAuth.Offset,
-                // should be the sha1 hash of the sentry file we just received
-                SentryFileHash = machineAuth.Data.ToSha1(),
-                OneTimePassword = machineAuth.OneTimePassword,
-                LastError = 0,
-                Result = EResult.OK,
-                JobID = machineAuth.JobID
-            };
-            _steamUser.SendMachineAuthResponse(authResponse);
         }
 
         #endregion
@@ -354,8 +355,10 @@ namespace SteamPrefill.Handlers.Steam
             });
         }
 
-        private void LicenseListCallback(SteamApps.LicenseListCallback licenseList)
+        private void LicenseListCallback(LicenseListCallback licenseList)
         {
+            var timer = Stopwatch.StartNew();
+
             _loadAccountLicensesIsRunning = false;
             if (licenseList.Result != EResult.OK)
             {
@@ -363,6 +366,8 @@ namespace SteamPrefill.Handlers.Steam
                 throw new SteamLoginException("Unable to retrieve user licenses!");
             }
             LicenseManager.LoadPackageInfo(licenseList.LicenseList);
+
+            _ansiConsole.LogMarkupLine("Loaded account licenses", timer);
         }
 
         #endregion

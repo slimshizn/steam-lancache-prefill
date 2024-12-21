@@ -6,12 +6,16 @@ namespace SteamPrefill.Settings
         {
             // Create required folders
             Directory.CreateDirectory(ConfigDir);
-            Directory.CreateDirectory(CacheDir);
+            Directory.CreateDirectory(TempDir);
         }
 
-        public static string SteamCdnUrl => "lancache.steamcontent.com";
+        /// <summary>
+        /// This domain is used to determine if there is an available Lancache instance available.
+        /// Resolving a private IP indicates that there is a cache available.
+        /// This is the same domain that the real Steam client uses to determine if a cache is available.
+        /// </summary>
+        public static string SteamTriggerDomain => "lancache.steamcontent.com";
 
-        //TODO comment
         private static bool _verboseLogs;
         public static bool VerboseLogs
         {
@@ -23,40 +27,16 @@ namespace SteamPrefill.Settings
             }
         }
 
-        //TODO comment
-        private static bool _enableSteamKitDebugLogs;
-        public static bool EnableSteamKitDebugLogs
-        {
-            get => _enableSteamKitDebugLogs;
-            set
-            {
-                VerboseLogs = true;
-                _enableSteamKitDebugLogs = value;
-            }
-        }
-
         /// <summary>
         /// Downloaded manifests, as well as other metadata, are saved into this directory to speedup future prefill runs.
         /// All data in here should be able to be deleted safely.
         /// </summary>
-        public static readonly string CacheDir = GetCacheDirBaseDirectories();
-
-        /// <summary>
-        /// Increment when there is a breaking change made to the files in the cache directory
-        /// </summary>
-        private const string CacheDirVersion = "v1";
+        public static readonly string TempDir = TempDirUtils.GetTempDirBaseDirectories("SteamPrefill", "v1");
 
         /// <summary>
         /// Contains user configuration.  Should not be deleted, doing so will reset the app back to defaults.
         /// </summary>
-        public static readonly string ConfigDir = Path.Combine(AppContext.BaseDirectory, "Config");
-
-        #region Timeouts
-
-        //TODO comment
-        public static TimeSpan SteamKitRequestTimeout => TimeSpan.FromSeconds(60);
-
-        #endregion
+        private static readonly string ConfigDir = Path.Combine(AppContext.BaseDirectory, "Config");
 
         #region Serialization file paths
 
@@ -69,51 +49,51 @@ namespace SteamPrefill.Settings
         public static readonly string UserSelectedAppsPath = Path.Combine(ConfigDir, "selectedAppsToPrefill.json");
 
         /// <summary>
-        /// Keeps track of which depots have been previously downloaded.  Is used to determine whether or not a game is up to date,
-        /// based on whether all of the depots being downloaded are up to date.
+        /// Keeps track of which depots have been previously downloaded.  Is used to determine whether a game is up-to-date,
+        /// based on whether all the depots being downloaded are up-to-date.
         /// </summary>
         public static readonly string SuccessfullyDownloadedDepotsPath = Path.Combine(ConfigDir, "successfullyDownloadedDepots.json");
 
+        /// <summary>
+        /// Stores the user's current CellId, which corresponds to their region.
+        /// </summary>
+        /// <see cref="Steam3Session.CellId">See for additional documentation</see>
+        public static readonly string CachedCellIdPath = Path.Combine(TempDir, "cellId.txt");
+
         #endregion
 
-#if DEBUG
+        #region Debugging
 
+        public static readonly string DebugOutputDir = Path.Combine(TempDir, "Debugging");
+
+        /// <summary>
+        /// Skips using locally cached manifests. Saves disk space, at the expense of slower subsequent runs.  Intended for debugging.
+        /// </summary>
+        public static bool NoLocalCache { get; set; }
+
+        /// <summary>
+        /// Will skip over downloading chunks, but will still download manifests and build the chunk download list.  Useful for testing
+        /// core logic of SteamPrefill without having to wait for downloads to finish.
+        /// </summary>
         public static bool SkipDownloads { get; set; }
 
-#endif
-
-        //TODO move to lancacheprefill.common
-        /// <summary>
-        /// Gets the base directories for the cache folder, determined by which Operating System the app is currently running on.
-        /// </summary>
-        /// <returns></returns>
-        /// <exception cref="NotSupportedException"></exception>
-        /// <exception cref="ArgumentOutOfRangeException"></exception>
-        private static string GetCacheDirBaseDirectories()
+        private static bool _debugLogs;
+        public static bool DebugLogs
         {
-            if (System.OperatingSystem.IsWindows())
+            get => _debugLogs;
+            set
             {
-                string pathAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-                return Path.Combine(pathAppData, "SteamPrefill", "Cache", CacheDirVersion);
-            }
-            if (System.OperatingSystem.IsLinux())
-            {
-                // Gets base directories for the XDG Base Directory specification (Linux)
-                string pathHome = Environment.GetEnvironmentVariable("HOME")
-                                  ?? throw new ArgumentNullException("HOME", "Could not determine HOME directory");
+                _debugLogs = value;
 
-                string pathXdgCacheHome = Environment.GetEnvironmentVariable("XDG_CACHE_HOME")
-                                          ?? Path.Combine(pathHome, ".cache");
-
-                return Path.Combine(pathXdgCacheHome, "SteamPrefill", CacheDirVersion);
+                // Enable verbose logs as well
+                VerboseLogs = true;
             }
-            if (System.OperatingSystem.IsMacOS())
-            {
-                string pathLibraryCaches = Path.GetFullPath("~/Library/Caches");
-                return Path.Combine(pathLibraryCaches, "SteamPrefill", CacheDirVersion);
-            }
-
-            throw new NotSupportedException($"Unknown platform {RuntimeInformation.OSDescription}");
         }
+
+        public static uint? CellIdOverride { get; set; }
+
+        public static int? MaxConcurrencyOverride { get; set; }
+
+        #endregion
     }
 }

@@ -12,16 +12,14 @@
         private readonly IAnsiConsole _ansiConsole;
         private readonly CdnPool _cdnPool;
         private readonly Steam3Session _steam3Session;
-        private readonly DownloadArguments _downloadArguments;
 
         private const int MaxRetries = 3;
 
-        public ManifestHandler(IAnsiConsole ansiConsole, CdnPool cdnPool, Steam3Session steam3Session, DownloadArguments downloadArguments)
+        public ManifestHandler(IAnsiConsole ansiConsole, CdnPool cdnPool, Steam3Session steam3Session)
         {
             _ansiConsole = ansiConsole;
             _cdnPool = cdnPool;
             _steam3Session = steam3Session;
-            _downloadArguments = downloadArguments;
         }
 
         /// <summary>
@@ -44,7 +42,7 @@
             depotManifests.AddRange(resultManifests);
 
             // Downloading un-cached depots from the internet
-            foreach (var depot in depots.Where(e => !ManifestIsCached(e)))
+            foreach (var depot in depots.Where(e => !ManifestIsCached(e)).ToList())
             {
                 int attempts = 0;
                 Manifest manifest = null;
@@ -52,9 +50,8 @@
                 {
                     try
                     {
-                        _ansiConsole.LogMarkupVerbose($"Downloading manifest {LightYellow(depot.ManifestId)} for depot {Cyan(depot.DepotId)}");
 
-                        manifest = await GetSingleManifestAsync(depot).WaitAsync(AppConfig.SteamKitRequestTimeout);
+                        manifest = await GetSingleManifestAsync(depot);
                         depotManifests.Add(manifest);
                     }
                     catch (Exception e)
@@ -105,6 +102,8 @@
                 return Manifest.LoadFromFile(depot.ManifestFileName);
             }
 
+            _ansiConsole.LogMarkupVerbose($"Downloading manifest {LightYellow(depot.ManifestId)} for depot {Cyan(depot.DepotId)}");
+
             ManifestRequestCode manifestRequestCode = await GetManifestRequestCodeAsync(depot);
 
             Server server = _cdnPool.TakeConnection();
@@ -116,7 +115,7 @@
             _cdnPool.ReturnConnection(server);
 
             var protoManifest = new Manifest(manifest, depot);
-            if (_downloadArguments.NoCache)
+            if (AppConfig.NoLocalCache)
             {
                 return protoManifest;
             }
@@ -132,14 +131,17 @@
         /// These manifest codes act as a form of "authorization" for the CDN.  You can only download a manifest if your account has access to the
         /// specified depot, so since the CDN itself doesn't check for access, this will prevent unauthorized depot downloads
         ///
-        /// https://steamdb.info/blog/manifest-request-codes/ 
+        /// https://steamdb.info/blog/manifest-request-codes/
         /// </summary>
         /// <param name="depot">The depot to request a manifest code for</param>
         /// <returns>A manifest code valid for 5 minutes.</returns>
         /// <exception cref="ManifestException">Throws if no valid manifest code was found</exception>
         private async Task<ManifestRequestCode> GetManifestRequestCodeAsync(DepotInfo depot)
         {
-            ulong manifestRequestCode = await _steam3Session.SteamContent.GetManifestRequestCode(depot.DepotId, depot.ContainingAppId, depot.ManifestId.Value, "public");
+            ulong manifestRequestCode = await _steam3Session.SteamContent.GetManifestRequestCode(depot.DepotId, depot.ContainingAppId, depot.ManifestId.Value, "public")
+                                                                         // Adding an additional timeout to this SteamKit method.  I have a feeling that this is not properly timing out
+                                                                         // for some users.
+                                                                         .WaitAsync(TimeSpan.FromSeconds(90));
 
             // If we could not get the manifest code, this is a fatal error, as it we can't download the manifest without it.
             if (manifestRequestCode == 0)
@@ -156,7 +158,7 @@
 
         private bool ManifestIsCached(DepotInfo depot)
         {
-            return !_downloadArguments.NoCache && File.Exists(depot.ManifestFileName);
+            return !AppConfig.NoLocalCache && File.Exists(depot.ManifestFileName);
         }
     }
 }

@@ -12,11 +12,11 @@
         /// </summary>
         private readonly Dictionary<uint, HashSet<ulong>> _downloadedDepots = new Dictionary<uint, HashSet<ulong>>();
 
-        public DepotHandler(IAnsiConsole ansiConsole, Steam3Session steam3Session, AppInfoHandler appInfoHandler, CdnPool cdnPool, DownloadArguments downloadArgs)
+        public DepotHandler(IAnsiConsole ansiConsole, Steam3Session steam3Session, AppInfoHandler appInfoHandler, CdnPool cdnPool)
         {
             _steam3Session = steam3Session;
             _appInfoHandler = appInfoHandler;
-            _manifestHandler = new ManifestHandler(ansiConsole, cdnPool, steam3Session, downloadArgs);
+            _manifestHandler = new ManifestHandler(ansiConsole, cdnPool, steam3Session);
 
             if (File.Exists(AppConfig.SuccessfullyDownloadedDepotsPath))
             {
@@ -38,10 +38,7 @@
                 }
 
                 var downloadedManifests = _downloadedDepots[depotId];
-                if (!downloadedManifests.Contains(depot.ManifestId.Value))
-                {
-                    downloadedManifests.Add(depot.ManifestId.Value);
-                }
+                downloadedManifests.Add(depot.ManifestId.Value);
             }
             File.WriteAllText(AppConfig.SuccessfullyDownloadedDepotsPath, JsonSerializer.Serialize(_downloadedDepots, SerializationContext.Default.DictionaryUInt32HashSetUInt64));
         }
@@ -106,7 +103,7 @@
                     continue;
                 }
 
-                // Low Violence 
+                // Low Violence
                 if (depot.LowViolence != null && depot.LowViolence.Value)
                 {
                     continue;
@@ -116,7 +113,8 @@
             return filteredDepots;
         }
 
-        //TODO comment
+        //TODO document how this works, and why its needed
+        //TODO I don't like the fact that this has to be manually called in order to have things work correctly
         public async Task BuildLinkedDepotInfoAsync(List<DepotInfo> depots)
         {
             foreach (var depotInfo in depots.Where(e => e.ManifestId == null))

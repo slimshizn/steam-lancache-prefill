@@ -2,7 +2,6 @@
 
 namespace SteamPrefill.CliCommands.Benchmark
 {
-    //TODO comment
     [ProtoContract(SkipConstructor = true)]
     public sealed class BenchmarkWorkload
     {
@@ -44,6 +43,7 @@ namespace SteamPrefill.CliCommands.Benchmark
         public BenchmarkWorkload(ConcurrentBag<AppQueuedRequests> queuedAppsList, ConcurrentStack<Server> cdnServers)
         {
             QueuedAppsList = queuedAppsList;
+            _totalDownloadSize = ByteSize.FromBytes(QueuedAppsList.Sum(e => e.TotalBytes));
             ServerShimList = cdnServers.Select(e => _mapper.Map<Server, CdnServerShim>(e)).ToList();
         }
 
@@ -51,10 +51,6 @@ namespace SteamPrefill.CliCommands.Benchmark
 
         public void PrintSummary(IAnsiConsole ansiConsole)
         {
-            // White spacing + a horizontal rule to delineate that the command has completed
-            ansiConsole.WriteLine();
-            ansiConsole.Write(new Rule());
-
             // Setting up final formatting, to make sure padding and alignment is correct
             var grid = new Grid()
                        .AddColumn(new GridColumn())
@@ -62,7 +58,7 @@ namespace SteamPrefill.CliCommands.Benchmark
                        .AddRow(White(Underline("Benchmark workload summary")))
                        .AddRow(BuildSummaryTable())
                        // Request distribution
-                       .AddRow(White(Underline("Request size distribution")))
+                       .AddRow(White(Underline("Chunk size distribution")))
                        .AddEmptyRow()
                        .AddRow(BuildRequestSizeChart());
 
@@ -99,7 +95,7 @@ namespace SteamPrefill.CliCommands.Benchmark
         }
 
         /// <summary>
-        /// Generates a bar chart of request size distribution
+        /// Generates a bar chart of chunk size distribution
         /// </summary>
         private BarChart BuildRequestSizeChart()
         {
@@ -138,7 +134,6 @@ namespace SteamPrefill.CliCommands.Benchmark
 
         #endregion
 
-        //TODO this could actually likely be generic
         #region Serialization
 
         public static BenchmarkWorkload LoadFromFile(string filename)
@@ -231,5 +226,19 @@ namespace SteamPrefill.CliCommands.Benchmark
             }
             return Host;
         }
+    }
+
+    /// <summary>
+    /// Defines available preset workloads, which consist of a single app.  These apps were chosen since they are free and are available by every account.
+    /// Each app has differing performance characteristics:
+    /// Destiny 2 is as close to an ideal workload as possible, as nearly all of its chunks are 1mb or larger.
+    /// Dota 2 is a worst case workload, as the chunks are very small
+    /// </summary>
+    [UsedImplicitly(ImplicitUseTargetFlags.Members)]
+    [Intellenum(typeof(string))]
+    public sealed partial class PresetWorkload
+    {
+        public static readonly PresetWorkload LargeChunks = new PresetWorkload("1085660");
+        public static readonly PresetWorkload SmallChunks = new PresetWorkload("570");
     }
 }

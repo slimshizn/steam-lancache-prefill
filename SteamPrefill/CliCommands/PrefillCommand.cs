@@ -1,25 +1,11 @@
 ﻿// ReSharper disable MemberCanBePrivate.Global - Properties used as parameters can't be private with CliFx, otherwise they won't work.
 namespace SteamPrefill.CliCommands
 {
-    //TODO need to rethink the verbiage between 'app' and 'game' on the user facing docs
     [UsedImplicitly]
     [Command("prefill", Description = "Downloads the latest version of one or more specified app(s)." +
                                            "  Automatically includes apps selected using the 'select-apps' command")]
     public class PrefillCommand : ICommand
     {
-
-#if DEBUG // Experimental, debugging only
-        [CommandOption("app", Description = "Debugging only.")]
-        public IReadOnlyList<uint> AppIds { get; init; }
-
-        [CommandOption("no-download", Description = "Debugging only.", Converter = typeof(NullableBoolConverter))]
-        public bool? NoDownload
-        {
-            get => AppConfig.SkipDownloads;
-            init => AppConfig.SkipDownloads = value ?? default(bool);
-        }
-#endif
-
         [CommandOption("all", Description = "Prefills all currently owned games", Converter = typeof(NullableBoolConverter))]
         public bool? DownloadAllOwnedGames { get; init; }
 
@@ -42,11 +28,6 @@ namespace SteamPrefill.CliCommands
         [CommandOption("os", Description = "Specifies which operating system(s) games should be downloaded for.  Can be windows/linux/macos",
             Converter = typeof(OperatingSystemConverter), Validators = new[] { typeof(OperatingSystemValidator) })]
         public IReadOnlyList<OperatingSystem> OperatingSystems { get; init; } = new List<OperatingSystem> { OperatingSystem.Windows };
-
-        [CommandOption("nocache",
-            Description = "Skips using locally cached files. Saves disk space, at the expense of slower subsequent runs.",
-            Converter = typeof(NullableBoolConverter))]
-        public bool? NoLocalCache { get; init; }
 
         [CommandOption("verbose", Description = "Produces more detailed log output. Will output logs for games are already up to date.", Converter = typeof(NullableBoolConverter))]
         public bool? Verbose
@@ -75,12 +56,11 @@ namespace SteamPrefill.CliCommands
             // Property must be set to false in order to disable ansi escape sequences
             _ansiConsole.Profile.Capabilities.Ansi = !NoAnsiEscapeSequences ?? true;
 
-            await UpdateChecker.CheckForUpdatesAsync(typeof(Program), "tpill90/steam-lancache-prefill", AppConfig.CacheDir);
+            await UpdateChecker.CheckForUpdatesAsync(typeof(Program), "tpill90/steam-lancache-prefill", AppConfig.TempDir);
 
             var downloadArgs = new DownloadArguments
             {
                 Force = Force ?? default(bool),
-                NoCache = NoLocalCache ?? default(bool),
                 TransferSpeedUnit = TransferSpeedUnit,
                 OperatingSystems = OperatingSystems.ToList()
             };
@@ -92,52 +72,9 @@ namespace SteamPrefill.CliCommands
             try
             {
                 await steamManager.InitializeAsync();
-
-                var manualIds = new List<uint>();
-#if DEBUG 
-                // Experimental, debugging only
-                if (AppIds != null)
-                {
-                    manualIds.AddRange(AppIds);
-                }
-#endif
                 await steamManager.DownloadMultipleAppsAsync(DownloadAllOwnedGames ?? default(bool),
                                                              PrefillRecentGames ?? default(bool),
-                                                             PrefillPopularGames,
-                                                             manualIds);
-            }
-            catch (TimeoutException e)
-            {
-                _ansiConsole.MarkupLine("\n");
-                if (e.StackTrace.Contains(nameof(UserAccountStore.GetUsernameAsync)))
-                {
-                    _ansiConsole.MarkupLine(Red("Timed out while waiting for username entry"));
-                }
-                if (e.StackTrace.Contains(nameof(SpectreConsoleExtensions.ReadPasswordAsync)))
-                {
-                    _ansiConsole.MarkupLine(Red("Timed out while waiting for password entry"));
-                }
-                _ansiConsole.WriteException(e, ExceptionFormats.ShortenPaths);
-            }
-            catch (TaskCanceledException e)
-            {
-                if (e.StackTrace.Contains(nameof(AppInfoHandler.RetrieveAppMetadataAsync)))
-                {
-                    _ansiConsole.MarkupLine(Red("Unable to load latest App metadata! An unexpected error occurred! \n" +
-                                                "This could possibly be due to transient errors with the Steam network. \n" +
-                                                "Try again in a few minutes."));
-
-                    FileLogger.Log("Unable to load latest App metadata! An unexpected error occurred!");
-                    FileLogger.Log(e.ToString());
-                }
-                else
-                {
-                    _ansiConsole.WriteException(e, ExceptionFormats.ShortenPaths);
-                }
-            }
-            catch (Exception e)
-            {
-                _ansiConsole.WriteException(e, ExceptionFormats.ShortenPaths);
+                                                             PrefillPopularGames);
             }
             finally
             {
@@ -149,13 +86,6 @@ namespace SteamPrefill.CliCommands
         private void ValidateUserHasSelectedApps(SteamManager steamManager)
         {
             var userSelectedApps = steamManager.LoadPreviouslySelectedApps();
-
-#if DEBUG
-            if (AppIds != null && AppIds.Any())
-            {
-                return;
-            }
-#endif
 
             if ((DownloadAllOwnedGames ?? default(bool)) || (PrefillRecentGames ?? default(bool)) || PrefillPopularGames != null || userSelectedApps.Any())
             {

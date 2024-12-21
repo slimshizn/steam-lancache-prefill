@@ -9,8 +9,8 @@ namespace SteamPrefill.Handlers.Steam
         private readonly IAnsiConsole _ansiConsole;
         private readonly Steam3Session _steamSession;
 
-        private int _minimumServerCount = 5;
-        private int _maxRetries = 3;
+        private readonly int _minimumServerCount = 5;
+        private readonly int _maxRetries = 3;
 
         public ConcurrentStack<Server> AvailableServerEndpoints = new ConcurrentStack<Server>();
 
@@ -42,6 +42,9 @@ namespace SteamPrefill.Handlers.Steam
                 return;
             }
 
+            _ansiConsole.LogMarkupVerbose($"Requesting available CDNs. Pool currently has {LightYellow(AvailableServerEndpoints.Count)} servers available," +
+                                          $" below the desired count of {Cyan(_minimumServerCount)}");
+
             var retryCount = 0;
             var statusMessageBase = White(" Getting available CDN Servers... ");
             await _ansiConsole.StatusSpinner().StartAsync(statusMessageBase, async task =>
@@ -59,10 +62,6 @@ namespace SteamPrefill.Handlers.Steam
                 }
             });
 
-#if DEBUG
-            PrintDebugInfo();
-#endif
-
             if (retryCount == _maxRetries && AvailableServerEndpoints.Empty())
             {
                 throw new CdnExhaustionException("Request for Steam CDN servers timed out!");
@@ -72,7 +71,11 @@ namespace SteamPrefill.Handlers.Steam
                 throw new CdnExhaustionException("Unable to get available CDN servers from Steam!");
             }
 
-            AvailableServerEndpoints = AvailableServerEndpoints.OrderBy(e => e.WeightedLoad).ToConcurrentStack();
+            AvailableServerEndpoints = AvailableServerEndpoints
+                                       // "CDN" type servers always have a load of 0, seem to be the fastest
+                                       .OrderByDescending(e => e.Load)
+                                       .ToConcurrentStack();
+
         }
 
         private async Task RequestSteamCdnServersAsync()
@@ -118,35 +121,13 @@ namespace SteamPrefill.Handlers.Steam
         }
 
         /// <summary>
-        /// Returns a connection to the pool of available connections, to be re-used later.
-        /// Only valid connections should be returned to the pool.
+        /// Returns a server to the pool of available servers, to be re-used later.
+        /// Only valid server should be returned to the pool.
         /// </summary>
-        /// <param name="connection">The connection that will be re-added to the pool.</param>
-        public void ReturnConnection(Server connection)
+        /// <param name="server">The server that will be re-added to the pool.</param>
+        public void ReturnConnection(Server server)
         {
-            AvailableServerEndpoints.Push(connection);
-        }
-
-        private void PrintDebugInfo()
-        {
-            if (!AppConfig.VerboseLogs)
-            {
-                return;
-            }
-
-            // Prints out retrieved CDNs
-            var table = new Table().AddColumns("Total Results", "_availableServerEndpoints");
-            _ansiConsole.Live(table).Start(task =>
-            {
-                Grid serverGrid = new Grid().AddColumn();
-                foreach (Server s in AvailableServerEndpoints)
-                {
-                    serverGrid.AddRow($"{s.Type} {MediumPurple(s.Host)}".ToMarkup());
-                    task.Refresh();
-                }
-
-                table.AddRow(AvailableServerEndpoints.Count.ToMarkup(), serverGrid);
-            });
+            AvailableServerEndpoints.Push(server);
         }
     }
 }

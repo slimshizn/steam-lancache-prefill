@@ -1,13 +1,7 @@
 ﻿namespace SteamPrefill.Models.Exceptions
 {
-    [Serializable]
-    public class InfiniteLoopException : Exception
+    public sealed class InfiniteLoopException : Exception
     {
-        protected InfiniteLoopException(SerializationInfo info, StreamingContext context) : base(info, context)
-        {
-
-        }
-
         public InfiniteLoopException()
         {
 

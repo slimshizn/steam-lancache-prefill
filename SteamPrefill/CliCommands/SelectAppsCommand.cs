@@ -22,19 +22,34 @@ namespace SteamPrefill.CliCommands
             try
             {
                 await steamManager.InitializeAsync();
+                var tuiAppModels = await BuildTuiAppModelsAsync(steamManager);
 
-                var games = await steamManager.GetAllAvailableGamesAsync();
+                if (System.OperatingSystem.IsLinux())
+                {
+                    // This is required to be enabled otherwise some Linux distros/shells won't display color correctly.
+                    Application.UseSystemConsole = true;
+                }
+                if (System.OperatingSystem.IsWindows())
+                {
+                    // Must be set to false on Windows otherwise navigation will not work in Windows Terminal
+                    Application.UseSystemConsole = false;
+                }
 
-                Application.UseSystemConsole = true;
                 Application.Init();
-                using var tui2 = new SelectAppsTui(games, steamManager);
+                using var tui2 = new SelectAppsTui(tuiAppModels);
                 Key userKeyPress = tui2.Run();
+
+                // There is an issue with Terminal.Gui where this property is set to 'true' when the TUI is initialized, but forgets to reset it back to 'false' when the TUI closes.
+                // This causes an issue where the prefill run is not able to be cancelled with ctrl+c, but only on Linux systems.
+                Console.TreatControlCAsInput = false;
+
 
                 // Will only allow for prefill if the user has saved changes.  Escape simply exists
                 if (userKeyPress != Key.Enter)
                 {
                     return;
                 }
+                steamManager.SetAppsAsSelected(tuiAppModels);
 
                 // This escape sequence is required when running on linux, otherwise will not be able to use the Spectre selection prompt
                 // See : https://github.com/gui-cs/Terminal.Gui/issues/418
@@ -48,46 +63,36 @@ namespace SteamPrefill.CliCommands
 
                 if (runPrefill)
                 {
-                    await steamManager.DownloadMultipleAppsAsync(false, false, null, new List<uint>());
+                    await steamManager.DownloadMultipleAppsAsync(false, false, null);
                 }
-            }
-            catch (TimeoutException e)
-            {
-                ansiConsole.MarkupLine("\n");
-                if (e.StackTrace.Contains(nameof(UserAccountStore.GetUsernameAsync)))
-                {
-                    ansiConsole.MarkupLine(Red("Timed out while waiting for username entry"));
-                }
-                if (e.StackTrace.Contains(nameof(SpectreConsoleExtensions.ReadPasswordAsync)))
-                {
-                    ansiConsole.MarkupLine(Red("Timed out while waiting for password entry"));
-                }
-                ansiConsole.WriteException(e, ExceptionFormats.ShortenPaths);
-            }
-            catch (TaskCanceledException e)
-            {
-                if (e.StackTrace.Contains(nameof(AppInfoHandler.RetrieveAppMetadataAsync)))
-                {
-                    ansiConsole.MarkupLine(Red("Unable to load latest App metadata! An unexpected error occurred! \n" +
-                                                "This could possibly be due to transient errors with the Steam network. \n" +
-                                                "Try again in a few minutes."));
-
-                    FileLogger.Log("Unable to load latest App metadata! An unexpected error occurred!");
-                    FileLogger.Log(e.ToString());
-                }
-                else
-                {
-                    ansiConsole.WriteException(e, ExceptionFormats.ShortenPaths);
-                }
-            }
-            catch (Exception e)
-            {
-                ansiConsole.WriteException(e, ExceptionFormats.ShortenPaths);
             }
             finally
             {
                 steamManager.Shutdown();
             }
+        }
+
+        private static async Task<List<TuiAppInfo>> BuildTuiAppModelsAsync(SteamManager steamManager)
+        {
+            // Listing user's owned apps, and selected apps
+            var ownedApps = await steamManager.GetAllAvailableAppsAsync();
+            var previouslySelectedApps = steamManager.LoadPreviouslySelectedApps();
+
+            // Building out Tui models
+            var tuiAppModels = ownedApps.Select(e =>
+                                        new TuiAppInfo(e.AppId.ToString(), e.Name)
+                                        {
+                                            MinutesPlayed = e.MinutesPlayed2Weeks,
+                                            ReleaseDate = e.ReleaseDate
+                                        }).ToList();
+
+            // Flagging previously selected apps as selected
+            foreach (var appInfo in tuiAppModels)
+            {
+                appInfo.IsSelected = previouslySelectedApps.Contains(UInt32.Parse(appInfo.AppId));
+            }
+
+            return tuiAppModels;
         }
     }
 }

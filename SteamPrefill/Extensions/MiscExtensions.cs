@@ -1,4 +1,4 @@
-﻿namespace SteamPrefill.Utils
+﻿namespace SteamPrefill.Extensions
 {
     public static class MiscExtensions
     {
@@ -20,28 +20,6 @@
             }
         }
 
-
-        [SuppressMessage("Microsoft.Security", "CA5350", Justification = "SHA1 is required by Steam")]
-        public static byte[] ToSha1(this byte[] input)
-        {
-            using var sha = SHA1.Create();
-            return sha.ComputeHash(input);
-        }
-
-        public static string FormatElapsedString(this Stopwatch stopwatch)
-        {
-            var elapsed = stopwatch.Elapsed;
-            if (elapsed.TotalHours > 1)
-            {
-                return elapsed.ToString(@"h\:mm\:ss\.ff");
-            }
-            if (elapsed.TotalMinutes > 1)
-            {
-                return elapsed.ToString(@"mm\:ss\.ff");
-            }
-            return elapsed.ToString(@"ss\.ffff");
-        }
-
         [SuppressMessage("Security", "CA5394:Random is an insecure RNG", Justification = "Security doesn't matter here, just need to shuffle requests.")]
         public static void Shuffle<T>(this IList<T> list)
         {
@@ -56,29 +34,50 @@
                 list[n] = value;
             }
         }
-    }
 
-    public static class StringExtensions
-    {
-        public static string Truncate(this string value, int maxLength)
+        public static async Task<string> ReadPasswordAsync(this IAnsiConsole console, string promptText = null)
         {
-            if (string.IsNullOrEmpty(value))
+            // Wrapping the prompt in a task so that we can add a timeout if the user doesn't enter a password
+            Task<string> promptTask = Task.Run(() =>
             {
-                return value;
-            }
+                var defaultPrompt = $"Please enter your {Cyan("Steam password")}. {LightYellow("(Password won't be saved)")} : ";
+                var password = console.Prompt(new TextPrompt<string>(promptText ?? defaultPrompt)
+                                      .PromptStyle("white")
+                                      .Secret());
 
-            return value.Substring(0, Math.Min(value.Length, maxLength));
+                // For whatever reason Steam allows you to enter as long of a password as you'd like, and silently truncates anything after 64 characters
+                if (password.Length > 64)
+                {
+                    return password.Substring(0, 64);
+                }
+
+                return password;
+            });
+            return await promptTask.WaitAsync(TimeSpan.FromSeconds(30));
         }
 
         /// <summary>
-        /// Pads string with whitespace, taking the width of Unicode characters (2 wide) into account
+        /// Steam returns a large amount of metadata, which can be difficult to sift through using the debugger.  This metadata will be
+        /// dumped to disk, so that it can be viewed in a text editor easily.
         /// </summary>
-        public static string PadRightUnicode(this string value, int totalWidth)
+        public static void WriteSteamMetadataToDisk(this KeyValue rootKeyValue, string filePath)
         {
-            var unicodeWidth = value.Sum(t => UnicodeCalculator.GetWidth(t));
+            if (!AppConfig.DebugLogs)
+            {
+                return;
+            }
+            if (File.Exists(filePath))
+            {
+                return;
+            }
 
-            // Adjusts the total padding by the additional width of the unicode characters
-            return value.PadRight(totalWidth - (unicodeWidth - value.Length));
+            var rootDir = Path.GetDirectoryName(filePath);
+            if (!Directory.Exists(rootDir))
+            {
+                Directory.CreateDirectory(rootDir);
+            }
+
+            rootKeyValue.SaveToFile(filePath, false);
         }
     }
 }

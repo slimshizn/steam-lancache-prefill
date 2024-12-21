@@ -7,3 +7,6 @@ lockfile
 /SteamPrefill/SteamPrefill.csproj.user
 /SteamPrefill.sln.DotSettings.user
 /docs/site
+/docs/__pycache__
+/docs/RenderAnsiToSvg/__pycache__
+/SteamPrefill/app.log

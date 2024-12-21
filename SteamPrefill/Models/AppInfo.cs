@@ -5,9 +5,6 @@
     /// </summary>
     public sealed class AppInfo
     {
-        //TODO remove
-        public bool IsSelected { get; set; }
-
         public uint AppId { get; set; }
         public ReleaseState ReleaseState { get; set; }
 
@@ -51,7 +48,7 @@
         public List<string> OSList { get; }
 
         // Some games simply don't have any OSList at all, so this means that they should always be considered as supported.
-        public bool SupportsWindows => !OSList.Any() || OSList.Contains("windows");
+        public bool SupportsWindows => OSList.Empty() || OSList.Contains("windows");
 
         /// <summary>
         /// Specifies the type of app, can be "config", "tool", "game".  This seems to be up to the developer, and isn't 100% consistent.
@@ -63,36 +60,34 @@
         public bool IsFreeGame { get; set; }
 
         public int? MinutesPlayed2Weeks { get; set; }
-        public decimal? HoursPlayed2Weeks => MinutesPlayed2Weeks == null ? null : (decimal)MinutesPlayed2Weeks / 60;
 
         public List<Category> Categories { get; init; }
-
-        [UsedImplicitly]
-        public AppInfo()
-        {
-            // Parameter-less constructor for deserialization
-        }
 
         public AppInfo(Steam3Session steamSession, uint appId, KeyValue rootKeyValue)
         {
             AppId = appId;
-
             Name = rootKeyValue["common"]["name"].Value.EscapeMarkup();
-            Type = rootKeyValue["common"]["type"].AsEnum<AppType>(toLower: true);
+
+
+            AppType.TryFromValue(rootKeyValue["common"]["type"].ToLowerCaseString(), out var appType);
+            Type = appType;
+
             OSList = rootKeyValue["common"]["oslist"].SplitCommaDelimited();
 
             SteamReleaseDate = rootKeyValue["common"]["steam_release_date"].AsDateTimeUtc();
             OriginalReleaseDate = rootKeyValue["common"]["original_release_date"].AsDateTimeUtc();
-            ReleaseState = rootKeyValue["common"]["releasestate"].AsEnum<ReleaseState>(toLower: true);
+
+            ReleaseState.TryFromValue(rootKeyValue["common"]["releasestate"].ToLowerCaseString(), out var releaseState);
+            ReleaseState = releaseState;
 
             if (rootKeyValue["depots"] != KeyValue.Invalid)
             {
-                // Depots should always have a ID for their name.
-                // For whatever reason Steam also includes branches + other metadata that we don't care about in here as well.
+                // Depots should always have a numerical ID for their name. For whatever reason Steam also includes branches + other metadata
+                // that we don't care about in here, which will be filtered out as they don't have a numerical ID
                 Depots = rootKeyValue["depots"].Children.Where(e => uint.TryParse(e.Name, out _))
-                                               .Select(e => new DepotInfo(e, appId))
-                                               .Where(e => !e.IsInvalidDepot)
-                                               .ToList();
+                                                       .Select(e => new DepotInfo(e, appId))
+                                                       .Where(e => !e.IsInvalidDepot)
+                                                       .ToList();
             }
 
             // Extended Section
